@@ -109,6 +109,9 @@ contract BenchmarkRunner is Script {
         uint256 gasEnd;
         uint256 transferAmount = 100 ether;
 
+        // Mint tokens to msg.sender first for transfer benchmark
+        token.mint(msg.sender, transferAmount * config.batchSize);
+
         for (uint256 i = 0; i < config.batchSize; i++) {
             address to = recipients[i];
 
@@ -148,13 +151,12 @@ contract BenchmarkRunner is Script {
         uint256 gasEnd;
         uint256 burnAmount = 10 ether;
 
-        // Mint tokens to burn first
         uint256 burnIterations = config.batchSize < 20 ? config.batchSize : 20;
 
-        for (uint256 i = 0; i < burnIterations; i++) {
-            // Mint to self then burn
-            token.mint(address(this), burnAmount);
+        // Mint all tokens needed for burning upfront
+        token.mint(msg.sender, burnAmount * burnIterations);
 
+        for (uint256 i = 0; i < burnIterations; i++) {
             gasStart = gasleft();
             token.burn(burnAmount);
             gasEnd = gasleft();
