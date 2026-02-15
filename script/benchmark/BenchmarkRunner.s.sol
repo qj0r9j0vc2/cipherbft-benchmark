@@ -118,6 +118,13 @@ contract BenchmarkRunner is Script {
         result.totalTxs = result.mintCount + result.transferCount + result.batchMintCount + result.burnCount;
         result.totalGasUsed = result.mintGas + result.transferGas + result.batchMintGas + result.burnGas;
 
+        // Phase 2: MaxTPS Measurement (if enabled)
+        if (config.runMaxTps) {
+            vm.startBroadcast();
+            _runMaxTpsPhase(token);
+            vm.stopBroadcast();
+        }
+
         _printResults();
         _writeJsonReport();
     }
@@ -206,6 +213,219 @@ contract BenchmarkRunner is Script {
         }
     }
 
+    // ============================================================
+    // MaxTPS Phase
+    // ============================================================
+
+    /// @notice Run maxTPS measurement phase for all operations
+    function _runMaxTpsPhase(TestToken token) internal {
+        console.log("");
+        console.log("========================================");
+        console.log("   MaxTPS Measurement Phase");
+        console.log("========================================");
+        console.log("");
+
+        mintMaxTps = _measureMaxTps(token, OperationType.MINT);
+        transferMaxTps = _measureMaxTps(token, OperationType.TRANSFER);
+        batchMintMaxTps = _measureMaxTps(token, OperationType.BATCH_MINT);
+        burnMaxTps = _measureMaxTps(token, OperationType.BURN);
+    }
+
+    /// @notice Measure maximum TPS for a specific operation type
+    function _measureMaxTps(TestToken token, OperationType opType)
+        internal
+        returns (MaxTpsResult memory)
+    {
+        string memory opName;
+        if (opType == OperationType.MINT) opName = "mint";
+        else if (opType == OperationType.TRANSFER) opName = "transfer";
+        else if (opType == OperationType.BATCH_MINT) opName = "batchMint";
+        else opName = "burn";
+
+        console.log("  Measuring maxTPS for:", opName);
+
+        uint256 currentBatchSize = config.maxTpsInitialBatch;
+        uint256 bestTps = 0;
+        uint256 bestBatchSize = 0;
+        uint256 bestGasPerBlock = 0;
+        uint256 totalTxs = 0;
+        uint256 roundsCompleted = 0;
+
+        while (currentBatchSize <= config.maxTpsMaxBatch) {
+            console.log("    Testing batch size:", currentBatchSize);
+
+            // Generate recipients for this round
+            address[] memory roundRecipients = new address[](currentBatchSize);
+            for (uint256 i = 0; i < currentBatchSize; i++) {
+                roundRecipients[i] = address(uint160(uint256(keccak256(abi.encodePacked("maxTps_recipient", block.timestamp, currentBatchSize, i)))));
+            }
+
+            // Record start state
+            uint256 startBlock = block.number;
+            uint256 startTimestamp = block.timestamp;
+
+            // Execute batch based on operation type
+            uint256 txCount;
+            uint256 gasUsed;
+            bool success;
+
+            if (opType == OperationType.MINT) {
+                (txCount, gasUsed, success) = _executeMintBatch(token, roundRecipients, currentBatchSize);
+            } else if (opType == OperationType.TRANSFER) {
+                (txCount, gasUsed, success) = _executeTransferBatch(token, roundRecipients, currentBatchSize);
+            } else if (opType == OperationType.BATCH_MINT) {
+                (txCount, gasUsed, success) = _executeBatchMintBatch(token, currentBatchSize);
+            } else if (opType == OperationType.BURN) {
+                (txCount, gasUsed, success) = _executeBurnBatch(token, currentBatchSize);
+            }
+
+            // Record end state
+            uint256 endBlock = block.number;
+            uint256 endTimestamp = block.timestamp;
+
+            if (!success) {
+                console.log("    FAILED at batch size:", currentBatchSize);
+                break;
+            }
+
+            // Calculate metrics
+            uint256 elapsedBlocks = endBlock > startBlock ? endBlock - startBlock : 1;
+            uint256 elapsedSeconds = endTimestamp > startTimestamp ? endTimestamp - startTimestamp : 1;
+            uint256 tps = txCount / elapsedSeconds;
+            uint256 gasPerBlock = gasUsed / elapsedBlocks;
+
+            console.log("    SUCCESS - TPS:", tps, "Gas/Block:", gasPerBlock);
+
+            // Update best result if this round was better
+            if (tps > bestTps) {
+                bestTps = tps;
+                bestBatchSize = currentBatchSize;
+                bestGasPerBlock = gasPerBlock;
+            }
+
+            totalTxs += txCount;
+            roundsCompleted++;
+
+            // Double batch size for next round
+            currentBatchSize = currentBatchSize * 2;
+        }
+
+        if (bestTps == 0) {
+            console.log("  WARNING: No successful rounds for", opName);
+        }
+
+        MaxTpsResult memory maxResult;
+        maxResult.maxTps = bestTps;
+        maxResult.optimalBatchSize = bestBatchSize;
+        maxResult.peakGasPerBlock = bestGasPerBlock;
+        maxResult.totalTxs = totalTxs;
+        maxResult.roundsCompleted = roundsCompleted;
+        return maxResult;
+    }
+
+    // ============================================================
+    // Batch Execution Helpers (for MaxTPS)
+    // ============================================================
+
+    /// @notice Execute a batch of mint operations
+    function _executeMintBatch(TestToken token, address[] memory _recipients, uint256 batchSize)
+        internal
+        returns (uint256 txCount, uint256 gasUsed, bool success)
+    {
+        uint256 mintAmount = 1000 ether;
+
+        for (uint256 i = 0; i < batchSize; i++) {
+            uint256 gasStart = gasleft();
+            try token.mint(_recipients[i], mintAmount) {
+                uint256 gasEnd = gasleft();
+                gasUsed += (gasStart - gasEnd);
+                txCount++;
+            } catch {
+                return (txCount, gasUsed, false);
+            }
+        }
+
+        return (txCount, gasUsed, true);
+    }
+
+    /// @notice Execute a batch of transfer operations
+    function _executeTransferBatch(TestToken token, address[] memory _recipients, uint256 batchSize)
+        internal
+        returns (uint256 txCount, uint256 gasUsed, bool success)
+    {
+        uint256 transferAmount = 100 ether;
+
+        // Mint tokens to msg.sender first
+        token.mint(msg.sender, transferAmount * batchSize);
+
+        for (uint256 i = 0; i < batchSize; i++) {
+            uint256 gasStart = gasleft();
+            try token.transfer(_recipients[i], transferAmount) {
+                uint256 gasEnd = gasleft();
+                gasUsed += (gasStart - gasEnd);
+                txCount++;
+            } catch {
+                return (txCount, gasUsed, false);
+            }
+        }
+
+        return (txCount, gasUsed, true);
+    }
+
+    /// @notice Execute batchMint operation
+    function _executeBatchMintBatch(TestToken token, uint256 batchSize)
+        internal
+        returns (uint256 txCount, uint256 gasUsed, bool success)
+    {
+        uint256 actualBatchSize = batchSize < 50 ? batchSize : 50;
+        address[] memory batchRecipients = new address[](actualBatchSize);
+        uint256[] memory batchAmounts = new uint256[](actualBatchSize);
+
+        for (uint256 i = 0; i < actualBatchSize; i++) {
+            batchRecipients[i] = address(uint160(uint256(keccak256(abi.encodePacked("batch_maxTps", block.timestamp, batchSize, i)))));
+            batchAmounts[i] = 500 ether;
+        }
+
+        uint256 gasStart = gasleft();
+        try token.batchMint(batchRecipients, batchAmounts) {
+            uint256 gasEnd = gasleft();
+            gasUsed = gasStart - gasEnd;
+            txCount = 1;
+            return (txCount, gasUsed, true);
+        } catch {
+            return (0, 0, false);
+        }
+    }
+
+    /// @notice Execute a batch of burn operations
+    function _executeBurnBatch(TestToken token, uint256 batchSize)
+        internal
+        returns (uint256 txCount, uint256 gasUsed, bool success)
+    {
+        uint256 burnAmount = 10 ether;
+        uint256 actualBurnIterations = batchSize < 20 ? batchSize : 20;
+
+        // Mint tokens first
+        token.mint(msg.sender, burnAmount * actualBurnIterations);
+
+        for (uint256 i = 0; i < actualBurnIterations; i++) {
+            uint256 gasStart = gasleft();
+            try token.burn(burnAmount) {
+                uint256 gasEnd = gasleft();
+                gasUsed += (gasStart - gasEnd);
+                txCount++;
+            } catch {
+                return (txCount, gasUsed, false);
+            }
+        }
+
+        return (txCount, gasUsed, true);
+    }
+
+    // ============================================================
+    // Display & Reporting
+    // ============================================================
+
     function _printHeader() internal pure {
         console.log("");
         console.log("========================================");
@@ -249,6 +469,54 @@ contract BenchmarkRunner is Script {
             console.log("  burn:", result.burnCount, "txs, avg gas:", result.burnGas / result.burnCount);
         }
         console.log("");
+
+        _printMaxTpsResults();
+    }
+
+    /// @notice Print maxTPS measurement results to console
+    function _printMaxTpsResults() internal view {
+        if (!config.runMaxTps) {
+            return;
+        }
+
+        console.log("=== MaxTPS Results ===");
+        console.log("");
+
+        if (mintMaxTps.maxTps > 0) {
+            console.log("mint:");
+            console.log("  Max TPS:", mintMaxTps.maxTps, "tx/s");
+            console.log("  Optimal Batch:", mintMaxTps.optimalBatchSize);
+            console.log("  Peak Gas/Block:", mintMaxTps.peakGasPerBlock);
+            console.log("  Rounds Completed:", mintMaxTps.roundsCompleted);
+            console.log("");
+        }
+
+        if (transferMaxTps.maxTps > 0) {
+            console.log("transfer:");
+            console.log("  Max TPS:", transferMaxTps.maxTps, "tx/s");
+            console.log("  Optimal Batch:", transferMaxTps.optimalBatchSize);
+            console.log("  Peak Gas/Block:", transferMaxTps.peakGasPerBlock);
+            console.log("  Rounds Completed:", transferMaxTps.roundsCompleted);
+            console.log("");
+        }
+
+        if (batchMintMaxTps.maxTps > 0) {
+            console.log("batchMint:");
+            console.log("  Max TPS:", batchMintMaxTps.maxTps, "tx/s");
+            console.log("  Optimal Batch:", batchMintMaxTps.optimalBatchSize);
+            console.log("  Peak Gas/Block:", batchMintMaxTps.peakGasPerBlock);
+            console.log("  Rounds Completed:", batchMintMaxTps.roundsCompleted);
+            console.log("");
+        }
+
+        if (burnMaxTps.maxTps > 0) {
+            console.log("burn:");
+            console.log("  Max TPS:", burnMaxTps.maxTps, "tx/s");
+            console.log("  Optimal Batch:", burnMaxTps.optimalBatchSize);
+            console.log("  Peak Gas/Block:", burnMaxTps.peakGasPerBlock);
+            console.log("  Rounds Completed:", burnMaxTps.roundsCompleted);
+            console.log("");
+        }
     }
 
     function _writeJsonReport() internal {
@@ -262,7 +530,10 @@ contract BenchmarkRunner is Script {
             ',"chainId":', vm.toString(result.chainId),
             ',"config":{"batchSize":', vm.toString(config.batchSize),
             ',"iterations":', vm.toString(config.iterations),
-            ',"tokenAddress":"', vm.toString(config.tokenAddress), '"}'
+            ',"tokenAddress":"', vm.toString(config.tokenAddress), '"',
+            ',"maxTpsInitialBatch":', vm.toString(config.maxTpsInitialBatch),
+            ',"maxTpsMaxBatch":', vm.toString(config.maxTpsMaxBatch),
+            ',"runMaxTps":', config.runMaxTps ? '"true"' : '"false"', '}'
         ));
 
         json = string(abi.encodePacked(
@@ -300,8 +571,12 @@ contract BenchmarkRunner is Script {
             json,
             ',"burn":{"count":', vm.toString(result.burnCount),
             ',"totalGas":', vm.toString(result.burnGas),
-            ',"avgGas":', vm.toString(result.burnCount > 0 ? result.burnGas / result.burnCount : 0), '}}}'
+            ',"avgGas":', vm.toString(result.burnCount > 0 ? result.burnGas / result.burnCount : 0), '}}'
         ));
+
+        // Add maxTPS section
+        string memory maxTpsJson = _buildMaxTpsJson();
+        json = string(abi.encodePacked(json, maxTpsJson, '}'));
 
         string memory filename = string(abi.encodePacked(
             config.reportDir, "/benchmark-", vm.toString(result.timestamp), ".json"
@@ -309,5 +584,56 @@ contract BenchmarkRunner is Script {
 
         vm.writeFile(filename, json);
         console.log("Report saved:", filename);
+    }
+
+    /// @notice Build JSON string for maxTPS results
+    function _buildMaxTpsJson() internal view returns (string memory) {
+        if (!config.runMaxTps) {
+            return "";
+        }
+
+        string memory json = ',"maxTps":{';
+
+        // Mint
+        json = string(abi.encodePacked(
+            json,
+            '"mint":{"maxTps":', vm.toString(mintMaxTps.maxTps),
+            ',"optimalBatchSize":', vm.toString(mintMaxTps.optimalBatchSize),
+            ',"peakGasPerBlock":', vm.toString(mintMaxTps.peakGasPerBlock),
+            ',"totalTxs":', vm.toString(mintMaxTps.totalTxs),
+            ',"roundsCompleted":', vm.toString(mintMaxTps.roundsCompleted), '}'
+        ));
+
+        // Transfer
+        json = string(abi.encodePacked(
+            json,
+            ',"transfer":{"maxTps":', vm.toString(transferMaxTps.maxTps),
+            ',"optimalBatchSize":', vm.toString(transferMaxTps.optimalBatchSize),
+            ',"peakGasPerBlock":', vm.toString(transferMaxTps.peakGasPerBlock),
+            ',"totalTxs":', vm.toString(transferMaxTps.totalTxs),
+            ',"roundsCompleted":', vm.toString(transferMaxTps.roundsCompleted), '}'
+        ));
+
+        // BatchMint
+        json = string(abi.encodePacked(
+            json,
+            ',"batchMint":{"maxTps":', vm.toString(batchMintMaxTps.maxTps),
+            ',"optimalBatchSize":', vm.toString(batchMintMaxTps.optimalBatchSize),
+            ',"peakGasPerBlock":', vm.toString(batchMintMaxTps.peakGasPerBlock),
+            ',"totalTxs":', vm.toString(batchMintMaxTps.totalTxs),
+            ',"roundsCompleted":', vm.toString(batchMintMaxTps.roundsCompleted), '}'
+        ));
+
+        // Burn
+        json = string(abi.encodePacked(
+            json,
+            ',"burn":{"maxTps":', vm.toString(burnMaxTps.maxTps),
+            ',"optimalBatchSize":', vm.toString(burnMaxTps.optimalBatchSize),
+            ',"peakGasPerBlock":', vm.toString(burnMaxTps.peakGasPerBlock),
+            ',"totalTxs":', vm.toString(burnMaxTps.totalTxs),
+            ',"roundsCompleted":', vm.toString(burnMaxTps.roundsCompleted), '}}'
+        ));
+
+        return json;
     }
 }
