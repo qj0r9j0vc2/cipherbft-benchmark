@@ -4,6 +4,14 @@ pragma solidity ^0.8.20;
 import {Script, console} from "forge-std/Script.sol";
 import {TestToken} from "../../src/TestToken.sol";
 
+/// @notice Operation types for maxTPS measurement
+enum OperationType {
+    MINT,
+    TRANSFER,
+    BATCH_MINT,
+    BURN
+}
+
 /// @title BenchmarkRunner - Core benchmark execution engine for CipherBFT
 /// @notice Measures TPS and Gas Per Block for token operations
 contract BenchmarkRunner is Script {
@@ -12,6 +20,29 @@ contract BenchmarkRunner is Script {
         uint256 batchSize;
         uint256 iterations;
         string reportDir;
+        uint256 maxTpsInitialBatch;  // NEW
+        uint256 maxTpsMaxBatch;      // NEW
+        bool runMaxTps;              // NEW
+    }
+
+    /// @notice Result of a single maxTPS ramp-up round
+    struct MaxTpsRoundResult {
+        uint256 batchSize;
+        uint256 txCount;
+        uint256 gasUsed;
+        uint256 elapsedBlocks;
+        uint256 elapsedSeconds;
+        uint256 tps;
+        bool success;
+    }
+
+    /// @notice Aggregated maxTPS results for an operation type
+    struct MaxTpsResult {
+        uint256 maxTps;           // Highest TPS achieved
+        uint256 optimalBatchSize; // Batch size that achieved maxTps
+        uint256 peakGasPerBlock;  // Gas/block at max throughput
+        uint256 totalTxs;         // Total transactions in successful rounds
+        uint256 roundsCompleted;  // Number of ramp-up rounds tested
     }
 
     struct BenchmarkResult {
@@ -36,6 +67,12 @@ contract BenchmarkRunner is Script {
     BenchmarkConfig public config;
     BenchmarkResult public result;
 
+    // MaxTPS measurement results
+    MaxTpsResult public mintMaxTps;
+    MaxTpsResult public transferMaxTps;
+    MaxTpsResult public batchMintMaxTps;
+    MaxTpsResult public burnMaxTps;
+
     // Pre-generated test addresses
     address[] internal recipients;
 
@@ -44,6 +81,9 @@ contract BenchmarkRunner is Script {
         config.batchSize = vm.envOr("BATCH_SIZE", uint256(100));
         config.iterations = vm.envOr("ITERATIONS", uint256(10));
         config.reportDir = vm.envOr("REPORT_DIR", string("benchmark-results"));
+        config.maxTpsInitialBatch = vm.envOr("MAX_TPS_INITIAL_BATCH", uint256(10));
+        config.maxTpsMaxBatch = vm.envOr("MAX_TPS_MAX_BATCH", uint256(10000));
+        config.runMaxTps = vm.envOr("RUN_MAX_TPS", true);
     }
 
     function run() external {
