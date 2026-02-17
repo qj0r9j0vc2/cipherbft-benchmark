@@ -19,5 +19,8 @@ coverage/
 # Benchmark results (generated)
 benchmark-results/
 
+# Node.js (benchmark tool)
+benchmark/node_modules/
+
 # macOS
 .DS_Store

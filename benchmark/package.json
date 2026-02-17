@@ -1,0 +1,12 @@
+{
+  "name": "cipherbft-maxtps-benchmark",
+  "version": "1.0.0",
+  "description": "Wall-clock maxTPS measurement for CipherBFT node",
+  "main": "maxTps.js",
+  "scripts": {
+    "benchmark": "node maxTps.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  }
+}
