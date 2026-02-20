@@ -146,13 +146,9 @@ async function executeRound(
   wallet,
   provider,
   operationType,
-  batchSize
+  batchSize,
+  baseNonce
 ) {
-  const baseNonce = await provider.getTransactionCount(
-    wallet.address,
-    "pending"
-  );
-
   // Build all transaction data
   const txDataArr = [];
   for (let i = 0; i < batchSize; i++) {
@@ -258,12 +254,15 @@ async function measureMaxTps(token, wallet, provider, operationType) {
   let totalTxs = 0;
   let roundsCompleted = 0;
   const rounds = [];
+  let localNonce = await provider.getTransactionCount(wallet.address, "latest");
 
   while (currentBatch <= CONFIG.maxBatch) {
     console.log(`    Testing batch size: ${currentBatch}`);
 
-    // Setup (not timed)
+    // Setup (not timed) — may send a tx with auto-nonce
     await setupForOperation(token, wallet, operationType, currentBatch);
+    // Re-sync from confirmed state after setup (setup awaits tx confirmation)
+    localNonce = await provider.getTransactionCount(wallet.address, "latest");
 
     // Execute round (timed)
     const roundResult = await executeRound(
@@ -271,7 +270,8 @@ async function measureMaxTps(token, wallet, provider, operationType) {
       wallet,
       provider,
       operationType,
-      currentBatch
+      currentBatch,
+      localNonce
     );
     rounds.push(roundResult);
 
@@ -295,6 +295,7 @@ async function measureMaxTps(token, wallet, provider, operationType) {
 
     totalTxs += roundResult.txCount;
     roundsCompleted++;
+    localNonce += currentBatch;
 
     // Double batch size for next round
     currentBatch *= 2;
